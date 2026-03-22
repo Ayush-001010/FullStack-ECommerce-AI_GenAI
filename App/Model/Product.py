@@ -18,3 +18,4 @@ class ProductDetails(Base):
     Quantity = Column(Integer, default=0)
     IsActive = Column(Boolean, default=True)
     categoryId = Column(Integer, nullable=False)
+    SubCategory = Column(String, nullable=False)
