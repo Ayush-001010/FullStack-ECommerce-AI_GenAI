@@ -33,8 +33,8 @@ class ChatRequest (BaseModel):
     assistant_question: Optional[str] = None
     userResponse: Optional[str] = None
     AskQuestionType: Optional[str] = None # "Text"
-    Category : Optional[str] = None
-    SubCategory : Optional[str] = None
+    Category : Optional[list[str]] = None
+    SubCategory : Optional[list[str]] = None
     ToolResponse : Optional[Any] = None
     FinalOuptut : Optional[Any] = None
 
@@ -57,9 +57,10 @@ def product_to_dict(p: ProductDetails) -> dict:
         "SubCategory": p.SubCategory,
     }
 
-def search_product(category : str , sub_catgory : str , db: Session):
-    categoryID = db.query(CategoryDetails).filter(CategoryDetails.Name == category).first().id
-    products = db.query(ProductDetails).filter(ProductDetails.categoryId == categoryID , ProductDetails.SubCategory == sub_catgory).all()
+def search_product(category : list[str] , sub_catgory : list[str] , db: Session):
+    category_ids = db.query(CategoryDetails.id).filter(CategoryDetails.Name.in_(category)).all()
+    category_ids = [id for (id,) in category_ids]
+    products = db.query(ProductDetails).filter(ProductDetails.categoryId.in_(category_ids) , ProductDetails.SubCategory.in_(sub_catgory)).all()
     return products
 
 def category_details(db : Session) : 
@@ -67,13 +68,12 @@ def category_details(db : Session) :
     category_names = [c.Name for c in category_details]
     return category_names
 
-def sub_category_details(category : str , db : Session) :
-    print("")
-    print("Category in sub_category_details is ", category)
-    categoryID = db.query(CategoryDetails).filter(CategoryDetails.Name == category).first().id
-    sub_category_details = db.query(ProductDetails.SubCategory).filter(ProductDetails.categoryId == categoryID).distinct().all()
-    subcategories = [row[0] for row in sub_category_details] 
-    print(subcategories)
+def sub_category_details(category : list[str] , db : Session) :
+    
+    category_ids = db.query(CategoryDetails.id).filter(CategoryDetails.Name.in_(category)).all()
+    category_ids = [id for (id,) in category_ids]
+    subcategories = db.query(ProductDetails.SubCategory).filter(ProductDetails.categoryId.in_(category_ids)).distinct().all()
+    subcategories = [sub[0] for sub in subcategories]
     return subcategories
 
 
@@ -85,265 +85,103 @@ class OpenAIChatClass :
 @router.post("/chat")
 async def chat(chats: list[ChatRequest] , db: Session = Depends(get_db)):
     system_prompt = """
-    Think step by step internally, but DO NOT output reasoning. Output ONLY the JSON object.
-    You work on Start, Plan and Output Steps.
-    Alway solve one step at a time and give output in below Output Formate.
+Think step by step internally, but DO NOT output reasoning. Output ONLY one JSON object.
 
+IMPORTANT:
+- In the real response to the user, you MUST output exactly ONE valid JSON object (one step only).
+- The examples below show multiple turns and are NOT meant to be returned together.
 
-    Rule:
-        - Output ONLY one valid JSON object and nothing else.
-        - No markdown.
-        - Think step by step internally, but DO NOT output reasoning.
-        
-    User Input :
-        - You will get array of ChatRequest objects.
-        - Each ChatRequest have 
-            - intent : which is the intent of user query. It must be None at the beginning.
-            - missing_fields : which is required fields that are missing to resolve user query. It must be None at the beginning.
-            - assistant_question : which is the question that assistant need to ask user to get missing information. It must be None at the beginning.
-            - userResponse : which is the response of user to assistant question. It some time can be None at the beginning.
-            - AskQuestionType : which is the type of question that assistant need to ask user. It can be "Text" or "Option". It must be None at the beginning.
-            - Category : which is the category of product user want to buy. It must be None at the beginning.
-            - SubCategory : which is the sub category of product user want to buy. It must be None at the beginning.
-            - ToolResponse : which is the response of tool that assistant used to resolve user query. It must be None at the beginning.
-            - FinalOuptut : which is the final output that assistant will give to user after resolving user query. It must be None at the beginning.
+You work on these steps: Start, Plan, Tool, Observe, Output.
 
-    Your Task :
-        - Your task is to help user to find the right product which user wants to buy.
-        - Initially user will give any one of response to you:
-            - "Explore Products on discount now"
-            - "I want to buy a new phone"
-        - Based on user query you need to find intent of user query and create new ChatRequest object and fill intent.
-            - "Explore Products on discount now" : intent will be "ExploreDiscountProducts"
-            - "I want to buy a new phone" : intent will be "BuyProduct"
-        - After finding intent you alway need to know about missing fields.
-        - Missing fields are:
-            - Category : which is the category of product user want to buy. 
-            - SubCategory : which is the sub category of product user want to buy.
-        - After finding missing fields. Set value Category and SubCategory in ChatRequest object.
-        -After find missing fields you need to ask user question and get response from user.
-            - you need set value AskQuestionType to "Text" . so that user can give response in text format.
-        - After finding that you have call search_product tool/fuction which return list of products based on category and subcategory. Return to user.
+Rules:
+- Output ONLY one valid JSON object and nothing else.
+- No markdown.
+- JSON must be valid (double quotes for keys/strings, true/false/null only).
 
-    Output Formate -
-        {
-            "step": "Plan",
-            "content": "",
-            "response": [],
-            "ToolName": null,
-            "ToolArgs": null,
-            "ToolResponse": null
-        }
-        Allowed values:
-            - "step" must be exactly one of: "Start", "Plan", "Tool", "Observe", "Output" .
-            - "ToolName" must be one of: "search_product", "category_details", "sub_category_details", or null
-            - "ToolArgs" is required when step is "Tool", otherwise null
-            - "ToolResponse" is used only to store the tool result, otherwise null
-        - Always give output in above format. Don't give output in any other format. Always follow above format strictly. Always give output as plain text. Don't use any markdown formatting. Don't use any code formatting. Just give output as plain text.
-        - In the senior steps like Plan or Observe the output still follow above format but ToolName and ToolResponse will be null. In the Tool step ToolName and ToolResponse will have value based on tool you used. In the Output step response will have value and other fields will be null.
-   
-   Tool Details: 
-        - search_product : which take category and subcategory as input and return list of products based on category and subcategory. You can call this function only once you have both category and subcategory.
-        - category_details : which return list of all categories and their details. You can call this function any time to get details of all categories. You can use this function to give user option of category.
-        - sub_category_details : which take category as input and return list of all sub categories of that category. You can call this function any time to get details of all sub categories of a category. You can use this function to give user option of sub category.
+User Input:
+- You will get array of ChatRequest objects.
+- Each ChatRequest has:
+  - intent: intent of user query (null at beginning)
+  - missing_fields: required fields missing (null at beginning)
+  - assistant_question: question assistant asks user (null at beginning)
+  - userResponse: user reply (can be null)
+  - AskQuestionType: "Text" or "Option" (null at beginning)
+  - ToolResponse: tool output (null at beginning)
+  - FinalOuptut: final message for user (null at beginning)
+  - Category: list of category names (null at beginning)
+  - SubCategory: list of sub category names (null at beginning)
 
-    Flow - 
-        Intent :
-            - ExploreDiscountProducts :
-                - Ask user about category of product. (missing field will be category)
-                - After getting category from user verify category with database using category_details tool. If category is not present in database then ask user to choose category from given options. (missing field will be category)
-                - After getting correct category from user. Set category in ChatRequest.
-                - Ask user about sub category of product. (missing field will be sub category)
-                - After getting sub category from user verify sub category with database using sub_category_details tool.
-                - After getting correct sub category from user. Set sub category in ChatRequest.
-                - Call search_product tool to get list of products based on category and sub category.
-                - Return products to user.
+Your Task:
+- Help user find the right product.
+- Initially user will give one of:
+  - "Explore Products on discount now"  -> intent: "ExploreDiscountProducts"
+  - "Let find the best product for you" -> intent: "BuyProduct"
+- Identify intent and missing fields.
+- Missing fields are: Category, SubCategory.
+- Ask questions to fill missing fields (AskQuestionType must be "Text").
+- Validate Category using category_details tool.
+- Validate SubCategory using sub_category_details tool.
+- Call search_product tool only after Category and SubCategory are known.
 
-    Example (valid JSON)
-User input chats
+Output Format:
 {
-  "step": "Start",
+  "step": "Plan",
   "content": "",
-  "response": [
-    {
-      "intent": null,
-      "missing_fields": null,
-      "assistant_question": null,
-      "userResponse": "I want shoes",
-      "AskQuestionType": null,
-      "Category": null,
-      "SubCategory": null,
-      "ToolResponse": null,
-      "FinalOuptut": null
-    }
-  ],
+  "response": [],
   "ToolName": null,
   "ToolArgs": null,
   "ToolResponse": null
 }
 
-Assistant tool call category_details (validate inferred category)
-{
-  "step": "Tool",
-  "content": "",
-  "response": [
-    {
-      "intent": "BuyProduct",
-      "missing_fields": [],
-      "assistant_question": null,
-      "userResponse": "I want shoes",
-      "AskQuestionType": null,
-      "Category": "Footware",
-      "SubCategory": "Shoes",
-      "ToolResponse": null,
-      "FinalOuptut": null
-    }
-  ],
-  "ToolName": "category_details",
-  "ToolArgs": {},
-  "ToolResponse": null
-}
+Allowed values:
+- step: "Start" | "Plan" | "Tool" | "Observe" | "Output"
+- ToolName: "search_product" | "category_details" | "sub_category_details" | null
+- ToolArgs is required ONLY when step is "Tool", otherwise null
+- ToolResponse is used ONLY to store tool result, otherwise null
 
-Backend ToolResult after running category_details
-{
-  "step": "ToolResult",
-  "content": "",
-  "response": [
-    {
-      "intent": "BuyProduct",
-      "missing_fields": [],
-      "assistant_question": null,
-      "userResponse": "I want shoes",
-      "AskQuestionType": null,
-      "Category": "Footware",
-      "SubCategory": "Shoes",
-      "ToolResponse": null,
-      "FinalOuptut": null
-    }
-  ],
-  "ToolName": "category_details",
-  "ToolArgs": {},
-  "ToolResponse": ["Footware", "Mobiles", "Clothing"]
-}
+Tool Details:
+- category_details: returns list of all categories
+- sub_category_details: input { "category": "<string>" }, returns list of sub categories
+- search_product: input { "category": "<string>", "sub_category": "<string or list of strings>" }, returns list of products
 
-Assistant tool call sub_category_details (validate inferred subcategory)
-{
-  "step": "Tool",
-  "content": "",
-  "response": [
-    {
-      "intent": "BuyProduct",
-      "missing_fields": [],
-      "assistant_question": null,
-      "userResponse": "I want shoes",
-      "AskQuestionType": null,
-      "Category": "Footware",
-      "SubCategory": "Shoes",
-      "ToolResponse": null,
-      "FinalOuptut": null
-    }
-  ],
-  "ToolName": "sub_category_details",
-  "ToolArgs": { "category": "Footware" },
-  "ToolResponse": null
-}
+Flow:
+Intent: ExploreDiscountProducts
+- Ask category -> validate via category_details
+- Ask sub category -> validate via sub_category_details
+- Call search_product -> return products
 
-Backend ToolResult after running sub_category_details
-{
-  "step": "ToolResult",
-  "content": "",
-  "response": [
-    {
-      "intent": "BuyProduct",
-      "missing_fields": [],
-      "assistant_question": null,
-      "userResponse": "I want shoes",
-      "AskQuestionType": null,
-      "Category": "Footware",
-      "SubCategory": "Shoes",
-      "ToolResponse": null,
-      "FinalOuptut": null
-    }
-  ],
-  "ToolName": "sub_category_details",
-  "ToolArgs": { "category": "Footware" },
-  "ToolResponse": ["Shoes", "Sandals", "Formal Shoes"]
-}
+Intent: BuyProduct
+- Ask category -> validate via category_details
+- Ask sub category -> validate via sub_category_details
+- Call search_product -> return products
 
-Assistant tool call search_product
-{
-  "step": "Tool",
-  "content": "",
-  "response": [
-    {
-      "intent": "BuyProduct",
-      "missing_fields": [],
-      "assistant_question": null,
-      "userResponse": null,
-      "AskQuestionType": null,
-      "Category": "Footware",
-      "SubCategory": "Shoes",
-      "ToolResponse": null,
-      "FinalOuptut": null
-    }
-  ],
-  "ToolName": "search_product",
-  "ToolArgs": { "category": "Footware", "sub_category": "Shoes" },
-  "ToolResponse": null
-}
+Example (multi-turn, NOT to be returned together):
 
-Backend ToolResult after running search_product
-{
-  "step": "ToolResult",
-  "content": "",
-  "response": [
-    {
-      "intent": "BuyProduct",
-      "missing_fields": [],
-      "assistant_question": null,
-      "userResponse": null,
-      "AskQuestionType": null,
-      "Category": "Footware",
-      "SubCategory": "Shoes",
-      "ToolResponse": null,
-      "FinalOuptut": null
-    }
-  ],
-  "ToolName": "search_product",
-  "ToolArgs": { "category": "Footware", "sub_category": "Shoes" },
-  "ToolResponse": [
-    { "id": 1, "name": "Nike Air Max", "price": 100, "discount": 10 },
-    { "id": 2, "name": "Adidas Superstar", "price": 80, "discount": 20 }
-  ]
-}
+{ "step": "Start", "content": "", "response": [ { "intent": null, "missing_fields": null, "assistant_question": null, "userResponse": "Let find the best product for you", "AskQuestionType": null, "Category": null, "SubCategory": null, "ToolResponse": null, "FinalOuptut": null } ], "ToolName": null, "ToolArgs": null, "ToolResponse": null }
 
-Assistant final output
-{
-  "step": "Output",
-  "content": "Here are shoes in Footware category",
-  "response": [
-    {
-      "intent": "BuyProduct",
-      "missing_fields": [],
-      "assistant_question": null,
-      "userResponse": null,
-      "AskQuestionType": null,
-      "Category": "Footware",
-      "SubCategory": "Shoes",
-      "ToolResponse": [
-        { "id": 1, "name": "Nike Air Max", "price": 100, "discount": 10 },
-        { "id": 2, "name": "Adidas Superstar", "price": 80, "discount": 20 }
-      ],
-      "FinalOuptut": "Here are shoes in Footware category"
-    }
-  ],
-  "ToolName": null,
-  "ToolArgs": null,
-  "ToolResponse": null
-}
+{ "step": "Output", "content": "", "response": [ { "intent": "BuyProduct", "missing_fields": ["Category"], "assistant_question": "Awesome—let’s build your perfect party look. Which category are you shopping from? (Footware, Mobiles, Fashion, Electronics)", "userResponse": null, "AskQuestionType": "Text", "Category": null, "SubCategory": null, "ToolResponse": null, "FinalOuptut": null } ], "ToolName": null, "ToolArgs": null, "ToolResponse": null }
+
+{ "step": "Start", "content": "", "response": [ { "intent": "BuyProduct", "missing_fields": ["Category"], "assistant_question": "Awesome—let’s build your perfect party look. Which category are you shopping from? (Footware, Mobiles, Fashion, Electronics)", "userResponse": "I’m looking for a stylish outfit for a party—something that makes me feel confident.", "AskQuestionType": "Text", "Category": null, "SubCategory": null, "ToolResponse": null, "FinalOuptut": null } ], "ToolName": null, "ToolArgs": null, "ToolResponse": null }
+
+{ "step": "Tool", "content": "", "response": [ { "intent": "BuyProduct", "missing_fields": ["Category"], "assistant_question": null, "userResponse": "I’m looking for a stylish outfit for a party—something that makes me feel confident.", "AskQuestionType": "Text", "Category": ["Fashion"], "SubCategory": null, "ToolResponse": null, "FinalOuptut": null } ], "ToolName": "category_details", "ToolArgs": {}, "ToolResponse": null }
+
+{ "step": "Observe", "content": "", "response": [ { "intent": "BuyProduct", "missing_fields": ["Category"], "assistant_question": null, "userResponse": "I’m looking for a stylish outfit for a party—something that makes me feel confident.", "AskQuestionType": "Text", "Category": ["Fashion"], "SubCategory": null, "ToolResponse": null, "FinalOuptut": null } ], "ToolName": "category_details", "ToolArgs": {}, "ToolResponse": ["Footware", "Mobiles", "Fashion", "Electronics"] }
+
+{ "step": "Output", "content": "", "response": [ { "intent": "BuyProduct", "missing_fields": ["SubCategory"], "assistant_question": "Nice—Fashion it is. What should your outfit include? You can mention one or more: Shirt, TShirt, Jeans (example: Shirt and Jeans).", "userResponse": null, "AskQuestionType": "Text", "Category": ["Fashion"], "SubCategory": null, "ToolResponse": null, "FinalOuptut": null } ], "ToolName": null, "ToolArgs": null, "ToolResponse": null }
+
+{ "step": "Start", "content": "", "response": [ { "intent": "BuyProduct", "missing_fields": ["SubCategory"], "assistant_question": "Nice—Fashion it is. What should your outfit include? You can mention one or more: Shirt, TShirt, Jeans (example: Shirt and Jeans).", "userResponse": "Shirt and Jeans", "AskQuestionType": "Text", "Category": ["Fashion"], "SubCategory": null, "ToolResponse": null, "FinalOuptut": null } ], "ToolName": null, "ToolArgs": null, "ToolResponse": null }
+
+{ "step": "Tool", "content": "", "response": [ { "intent": "BuyProduct", "missing_fields": ["SubCategory"], "assistant_question": null, "userResponse": "Shirt and Jeans", "AskQuestionType": "Text", "Category": ["Fashion"], "SubCategory": ["Shirt", "Jeans"], "ToolResponse": null, "FinalOuptut": null } ], "ToolName": "sub_category_details", "ToolArgs": { "category": "Fashion" }, "ToolResponse": null }
+
+{ "step": "Observe", "content": "", "response": [ { "intent": "BuyProduct", "missing_fields": ["SubCategory"], "assistant_question": null, "userResponse": "Shirt and Jeans", "AskQuestionType": "Text", "Category": ["Fashion"], "SubCategory": ["Shirt", "Jeans"], "ToolResponse": null, "FinalOuptut": null } ], "ToolName": "sub_category_details", "ToolArgs": { "category": "Fashion" }, "ToolResponse": ["Shirt", "TShirt", "Jeans"] }
+
+{ "step": "Tool", "content": "", "response": [ { "intent": "BuyProduct", "missing_fields": [], "assistant_question": null, "userResponse": null, "AskQuestionType": null, "Category": ["Fashion"], "SubCategory": ["Shirt", "Jeans"], "ToolResponse": null, "FinalOuptut": null } ], "ToolName": "search_product", "ToolArgs": { "category": "Fashion", "sub_category": ["Shirt", "Jeans"] }, "ToolResponse": null }
+
+{ "step": "Observe", "content": "", "response": [ { "intent": "BuyProduct", "missing_fields": [], "assistant_question": null, "userResponse": null, "AskQuestionType": null, "Category": ["Fashion"], "SubCategory": ["Shirt", "Jeans"], "ToolResponse": null, "FinalOuptut": null } ], "ToolName": "search_product", "ToolArgs": { "category": "Fashion", "sub_category": ["Shirt", "Jeans"] }, "ToolResponse": [ { "id": 201, "Name": "Slim Fit Party Shirt", "Price": 1222, "ImageKey": "Product/White_Shirt.jpg", "IsDiscounted": true, "DiscountPercentage": 15, "Rating": 4.5, "NoOfRatings": 100, "IsBestSeller": true, "Quantity": 10, "IsActive": true, "categoryId": 1, "SubCategory": "Shirt", "Description": "Something" }, { "id": 202, "Name": "Satin Black Shirt", "Price": 1799, "ImageKey": "Product/White_Shirt.jpg", "IsDiscounted": true, "DiscountPercentage": 20, "Rating": 4.7, "NoOfRatings": 150, "IsBestSeller": true, "Quantity": 5, "IsActive": true, "categoryId": 1, "SubCategory": "Shirt", "Description": "Something" }, { "id": 301, "Name": "Dark Wash Slim Jeans", "Price": 1999, "ImageKey": "Product/White_Shirt.jpg", "IsDiscounted": true, "DiscountPercentage": 10, "Rating": 4.3, "NoOfRatings": 80, "IsBestSeller": false, "Quantity": 8, "IsActive": true, "categoryId": 1, "SubCategory": "Jeans", "Description": "Something" }, { "id": 302, "Name": "Stretch Fit Black Jeans", "Price": 2299, "ImageKey": "Product/White_Shirt.jpg", "IsDiscounted": true, "DiscountPercentage": 12, "Rating": 4.6, "NoOfRatings": 120, "IsBestSeller": true, "Quantity": 3, "IsActive": true, "categoryId": 1, "SubCategory": "Jeans", "Description": "Something" } ] }
+
+{ "step": "Output", "content": "Here are some great Fashion picks for your party outfit (Shirt + Jeans). Want me to filter by color (black/white/blue) or budget?", "response": [ { "intent": "BuyProduct", "missing_fields": [], "assistant_question": null, "userResponse": null, "AskQuestionType": null, "Category": ["Fashion"], "SubCategory": ["Shirt", "Jeans"], "ToolResponse": [ { "id": 201, "Name": "Slim Fit Party Shirt", "Price": 1222, "ImageKey": "Product/White_Shirt.jpg", "IsDiscounted": true, "DiscountPercentage": 15, "Rating": 4.5, "NoOfRatings": 100, "IsBestSeller": true, "Quantity": 10, "IsActive": true, "categoryId": 1, "SubCategory": "Shirt", "Description": "Something" }, { "id": 202, "Name": "Satin Black Shirt", "Price": 1799, "ImageKey": "Product/White_Shirt.jpg", "IsDiscounted": true, "DiscountPercentage": 20, "Rating": 4.7, "NoOfRatings": 150, "IsBestSeller": true, "Quantity": 5, "IsActive": true, "categoryId": 1, "SubCategory": "Shirt", "Description": "Something" }, { "id": 301, "Name": "Dark Wash Slim Jeans", "Price": 1999, "ImageKey": "Product/White_Shirt.jpg", "IsDiscounted": true, "DiscountPercentage": 10, "Rating": 4.3, "NoOfRatings": 80, "IsBestSeller": false, "Quantity": 8, "IsActive": true, "categoryId": 1, "SubCategory": "Jeans", "Description": "Something" }, { "id": 302, "Name": "Stretch Fit Black Jeans", "Price": 2299, "ImageKey": "Product/White_Shirt.jpg", "IsDiscounted": true, "DiscountPercentage": 12, "Rating": 4.6, "NoOfRatings": 120, "IsBestSeller": true, "Quantity": 3, "IsActive": true, "categoryId": 1, "SubCategory": "Jeans", "Description": "Something" } ], "FinalOuptut": "Here are some great Fashion picks for your party outfit (Shirt + Jeans). Want me to filter by color (black/white/blue) or budget?" } ], "ToolName": null, "ToolArgs": null, "ToolResponse": null }
 
 """
-    
     openAIChats : list[OpenAIChatClass] = [
         { "role" : "system" , "content" : system_prompt }
     ]
@@ -352,7 +190,7 @@ Assistant final output
     client = get_openai_client()
     print("Initial Chats ", openAIChats)
     while True:
-        response = client.chat.completions.create(model = "gpt-4o-mini",messages = openAIChats)
+        response = client.chat.completions.create(model = "gpt-4o",messages = openAIChats)
         assistant_text = response.choices[0].message.content
         print("Assistant text:", repr(assistant_text))
         print("")
